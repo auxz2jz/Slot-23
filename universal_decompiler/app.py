@@ -12,6 +12,7 @@ from uuid import uuid4
 from . import __version__
 from .analyzer import AnalysisReport, analyze_file, report_text
 from .diagnostics import GuidedTest, Trace, ScanWatchdog, exception_details
+from .live_console import LiveConsole
 
 BG = "#101b2a"
 PANEL = "#17273c"
@@ -35,12 +36,20 @@ class DesktopApp(tk.Tk):
         self.busy = False
         self._watchdog: ScanWatchdog | None = None
         self._build_ui()
+        self.after(100, self._initialize_console_height)
         self.report_callback_exception = self._unexpected_error
         self.protocol("WM_DELETE_WINDOW", self._close_app)
         self.trace_log.event("UI", "READY", view="stage1")
         self.after(1000, self._ui_heartbeat)
 
+    def _initialize_console_height(self):
+        """Show enough recent events on first launch; user can resize the sash."""
+        if self.split.winfo_exists() and self.split.winfo_height() > 450:
+            height = self.split.winfo_height()
+            self.split.sash_place(0, 0, max(235, height - 215))
+
     def _close_app(self):
+        self.console.close()
         if self.busy:
             # A daemon scan will be interrupted; preserve its recovery marker.
             self.trace_log.event("APP", "EXIT_WHILE_SCAN_ACTIVE")
@@ -99,8 +108,11 @@ class DesktopApp(tk.Tk):
                                       bg=PANEL, fg=MUTED, justify="left", anchor="w", font=("Segoe UI", 10))
         self.details_label.pack(fill="x", pady=(6, 0))
 
-        workspace = ttk.Frame(self)
-        workspace.pack(fill="both", expand=True, padx=15, pady=(0, 12))
+        self.split = tk.PanedWindow(self, orient="vertical", bg="#38516b", sashwidth=7,
+                                    sashrelief="flat", borderwidth=0)
+        self.split.pack(fill="both", expand=True, padx=15, pady=(0, 10))
+        workspace = ttk.Frame(self.split)
+        self.split.add(workspace, minsize=235, stretch="always")
         workspace.columnconfigure(0, weight=3)
         workspace.columnconfigure(1, weight=2)
         workspace.rowconfigure(0, weight=3)
@@ -131,6 +143,9 @@ class DesktopApp(tk.Tk):
         self.hex_box = tk.Text(bottom, bg=PANEL, fg="#a9ceff", font=("Consolas", 10),
                                relief="flat", wrap="none", state="disabled")
         self.hex_box.pack(fill="both", expand=True)
+
+        self.console = LiveConsole(self.split, self.trace_log)
+        self.split.add(self.console, minsize=115, stretch="always")
 
         self.status = tk.StringVar(value="Ready  ·  No binary loaded  ·  All analysis is read-only and local")
         tk.Label(self, textvariable=self.status, bg="#0a1523", fg=MUTED,

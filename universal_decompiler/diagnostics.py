@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from collections import deque
+from typing import Callable
 import traceback
 import json
 import os
@@ -53,6 +55,7 @@ class Trace:
         self.start = time.monotonic()
         self.sequence = 0
         self._lock = threading.Lock()
+        self._listeners: list[Callable[[dict], None]] = []
         self.event("APP", "START", result="started")
         if self.session_marker.is_file():
             try:
@@ -92,7 +95,42 @@ class Trace:
             with self.file.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(payload, ensure_ascii=True) + "\n")
                 stream.flush()
+            listeners = tuple(self._listeners)
+        # Subscribers are called *outside* the trace lock to avoid deadlocks.
+        for listener in listeners:
+            try:
+                listener(payload)
+            except Exception:
+                # A failed display must not prevent durable diagnostic recording.
+                pass
         return event_id
+
+    def subscribe(self, callback: Callable[[dict], None]) -> None:
+        with self._lock:
+            if callback not in self._listeners:
+                self._listeners.append(callback)
+
+    def unsubscribe(self, callback: Callable[[dict], None]) -> None:
+        with self._lock:
+            if callback in self._listeners:
+                self._listeners.remove(callback)
+
+    def recent_events(self, limit: int = 250) -> list[dict]:
+        """Read bounded history to populate the console; gracefully ignore torn lines."""
+        if limit <= 0:
+            return []
+        with self._lock:
+            tail = deque(maxlen=min(limit, 2000))
+            for file in (self.previous, self.file):
+                if not file.exists():
+                    continue
+                with file.open("r", encoding="utf-8") as stream:
+                    for line in stream:
+                        try:
+                            tail.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            continue
+        return list(tail)
 
     def _write_session_marker(self) -> None:
         with self._lock:
