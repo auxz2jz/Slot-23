@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, field
 from hashlib import sha256
 from pathlib import Path
 import struct
-from typing import BinaryIO
+from typing import BinaryIO, Callable
 
 SCAN_WINDOW = 4 * 1024 * 1024
 HEX_PREVIEW_BYTES = 256
@@ -72,11 +72,15 @@ def _unpack(data: bytes, offset: int, format_code: str):
     return struct.unpack_from(format_code, data, offset)[0]
 
 
-def _hash_stream(stream: BinaryIO) -> str:
+def _hash_stream(stream: BinaryIO, progress: Callable[[str], None] | None = None) -> str:
     digest = sha256()
     stream.seek(0)
+    chunks = 0
     while chunk := stream.read(1024 * 1024):
         digest.update(chunk)
+        chunks += 1
+        if progress and chunks % 4 == 0:
+            progress("hashing")
     return digest.hexdigest()
 
 
@@ -185,8 +189,10 @@ def _identify_container(sample: bytes, report: AnalysisReport) -> None:
         report.warnings.append("Raw/unknown binary: architecture cannot be determined reliably from this scan.")
 
 
-def analyze_file(path: str | Path) -> AnalysisReport:
+def analyze_file(path: str | Path, *, progress: Callable[[str], None] | None = None) -> AnalysisReport:
     """Analyze untrusted bytes without executing, extracting, or modifying the input."""
+    if progress:
+        progress("validating_file")
     input_path = Path(path)
     if not input_path.is_file():
         raise ValueError("Select a readable file (not a directory).")
@@ -196,6 +202,8 @@ def analyze_file(path: str | Path) -> AnalysisReport:
 
     with input_path.open("rb") as stream:
         sample = stream.read(min(size, SCAN_WINDOW))
+        if progress:
+            progress("inspecting_headers")
         report = AnalysisReport(
             filename=input_path.name,
             size_bytes=size,
@@ -221,9 +229,11 @@ def analyze_file(path: str | Path) -> AnalysisReport:
                     report.segments.append(Segment(idx, None, description, "Signature candidate; not proof of valid content"))
                 start = idx + len(magic)
                 matches += 1
+        if progress:
+            progress("hashing")
         if size > SCAN_WINDOW:
             report.warnings.append(f"Embedded-signature search limited to first {SCAN_WINDOW:,} bytes; this is not a whole-image partition map.")
-        report.sha256_hex = _hash_stream(stream)
+        report.sha256_hex = _hash_stream(stream, progress)
     return report
 
 

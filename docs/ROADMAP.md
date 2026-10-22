@@ -1,13 +1,14 @@
 # Roadmap — atomic, evidence-based milestones
 
-Only the **first milestone** below is authorized in this turn. All further implementation awaits a new user request. Each task is designed to be independently verifiable; split further if its actual scope grows.
+The initial milestone plus in-scope diagnostic hardening are authorized. Other implementation still awaits a new user request. Each task is designed to be independently verifiable; split further if its actual scope grows.
 
 ## Stage 1: Binary identification
 
 | ID | Objective / dependencies | Completion criteria / verification | Status | Recommended reasoning |
 |---|---|---|---|---|
 | UD-S1-001 | Establish Windows-friendly application and read-only Stage 1 scanner; global rules and handoff, diagnostics, guided tests. No external binary needed. | Source files and docs committed; synthetic PE/ELF/unknown fixture tests pass locally; Windows GUI manual test remains pending. | CANDIDATE (not user-verified) | Medium; High only for unexplained binary parser defects |
-| UD-S1-002 | Verify UI on a real Windows computer; dependencies: v0.1.0, user's test/diagnostics. | Launch, PE scan, report save, guided test, diagnostics verified on Windows; record physical baseline. | NOT AUTHORIZED YET | Low/Medium; escalate if reproducible failures |
+| UD-S1-001D | Harden Stage 1 error/stall recovery: background scan watchdog, progress breadcrumb, crash/unclean-session markers, stack-frame logging and recovery tests. | Headless tests pass; pending Windows validation. | CANDIDATE (not user-verified) | Medium; High for unexpected Windows threading failures |
+| UD-S1-002 | Verify UI on a real Windows computer; dependencies: v0.1.1, user's test/diagnostics. | Launch, PE scan, report save, guided test, diagnostics verified on Windows; record physical baseline. | NOT AUTHORIZED YET | Low/Medium; escalate if reproducible failures |
 | UD-S1-003 | Package a Windows `.exe` using reproducible Windows build steps; depends on Windows tests. | EXE builds on Windows, starts, and passes user-guided tests. | NOT AUTHORIZED YET | Medium |
 | UD-S1-004 | Add validated PE/ELF import/export metadata and more format fixtures, bounded safeguards. | New targeted parser tests and Windows manual verification. | NOT AUTHORIZED YET | Medium |
 | UD-S1-005 | Add modular firmware signature plugins and limited extraction to a sandbox. | Safe fixture extraction and explicit limits verified. | NOT AUTHORIZED YET | High |

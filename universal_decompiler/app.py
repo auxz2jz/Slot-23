@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from . import __version__
 from .analyzer import AnalysisReport, analyze_file, report_text
-from .diagnostics import GuidedTest, Trace
+from .diagnostics import GuidedTest, Trace, ScanWatchdog, exception_details
 
 BG = "#101b2a"
 PANEL = "#17273c"
@@ -28,13 +28,36 @@ class DesktopApp(tk.Tk):
         self.minsize(920, 640)
         self.configure(bg=BG)
         self.trace_log = Trace()
+        self.trace_log.install_exception_hooks()
         self.guide = GuidedTest(self.trace_log)
         self.selected: Path | None = None
         self.report: AnalysisReport | None = None
         self.busy = False
+        self._watchdog: ScanWatchdog | None = None
         self._build_ui()
         self.report_callback_exception = self._unexpected_error
+        self.protocol("WM_DELETE_WINDOW", self._close_app)
         self.trace_log.event("UI", "READY", view="stage1")
+        self.after(1000, self._ui_heartbeat)
+
+    def _close_app(self):
+        if self.busy:
+            # A daemon scan will be interrupted; preserve its recovery marker.
+            self.trace_log.event("APP", "EXIT_WHILE_SCAN_ACTIVE")
+        else:
+            self.trace_log.close_session()
+        self.destroy()
+
+    def _ui_heartbeat(self):
+        if self._watchdog is not None:
+            self._watchdog.ui_heartbeat()
+        self.after(1000, self._ui_heartbeat)
+
+    def _finish_scan_tracking(self, correlation_id: str):
+        if self._watchdog is not None:
+            self._watchdog.stop()
+            self._watchdog = None
+        self.trace_log.finish_operation(correlation_id)
 
     def _build_ui(self):
         style = ttk.Style(self)
@@ -148,6 +171,9 @@ class DesktopApp(tk.Tk):
         path = self.selected
         self.trace_log.event("USER_ACTION", "SCAN", correlation_id=correlation, filename=path.name)
         self.trace_log.event("OPERATION_START", "ANALYZE", correlation_id=correlation)
+        self.trace_log.save_operation_state(correlation, "SCAN", "starting")
+        self._watchdog = ScanWatchdog(self.trace_log, correlation)
+        self._watchdog.start()
         self.busy = True
         self.scan_btn.configure(state="disabled")
         self.open_btn.configure(state="disabled")
@@ -155,31 +181,46 @@ class DesktopApp(tk.Tk):
         self.status.set("Scanning read-only  ·  Calculating SHA-256 and inspecting signatures...")
         t0 = time.monotonic()
 
+        watchdog = self._watchdog
+        last_marker = [0.0, ""]
+
+        def progress(phase: str):
+            if watchdog:
+                watchdog.progress(phase)
+            # Retain phase breadcrumbs without writing a file for every hash chunk.
+            now = time.monotonic()
+            if phase != last_marker[1] or now - last_marker[0] >= 10:
+                self.trace_log.save_operation_state(correlation, "SCAN", phase)
+                self.trace_log.event("STATE_TRANSITION", "SCAN_PROGRESS",
+                                     correlation_id=correlation, phase=phase)
+                last_marker[:] = [now, phase]
+
         def worker():
             try:
-                result = analyze_file(path)
+                result = analyze_file(path, progress=progress)
             except Exception as exc:
-                self.trace_log.event("ERROR", "SCAN_FAILED", correlation_id=correlation,
-                                     errorType=type(exc).__name__, errorMessage=type(exc).__name__)
-                self.after(0, lambda e=str(type(exc).__name__): self._scan_failed(e))
+                event_id = self.trace_log.event("ERROR", "SCAN_FAILED", correlation_id=correlation,
+                                                **exception_details(exc))
+                self.after(0, lambda e=type(exc).__name__, eid=event_id: self._scan_failed(e, correlation, eid))
                 return
             elapsed = round((time.monotonic() - t0) * 1000)
             self.trace_log.event("OPERATION_RESULT", "ANALYZE_SUCCEEDED", correlation_id=correlation,
                                  durationMs=elapsed, format=result.file_format,
                                  architecture=result.architecture, sections=len(result.segments),
                                  sha256=result.sha256_hex)
-            self.after(0, lambda: self._scan_done(result, elapsed))
+            self.after(0, lambda: self._scan_done(result, elapsed, correlation))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _scan_failed(self, error: str):
+    def _scan_failed(self, error: str, correlation_id: str, event_id: str):
+        self._finish_scan_tracking(correlation_id)
         self.busy = False
         self.scan_btn.configure(state="normal")
         self.open_btn.configure(state="normal")
         self.status.set("Scan failed  ·  Export Diagnostics for investigation")
-        messagebox.showerror("Scan failed", f"The file could not be analyzed ({error}).")
+        messagebox.showerror("Scan failed", f"The file could not be analyzed ({error}).\nDiagnostic event ID: {event_id}")
 
-    def _scan_done(self, report: AnalysisReport, elapsed: int):
+    def _scan_done(self, report: AnalysisReport, elapsed: int, correlation_id: str):
         self.busy = False
         self.report = report
         self.scan_btn.configure(state="normal")
@@ -202,6 +243,7 @@ class DesktopApp(tk.Tk):
         self.guide.observe("T1-PE-SCAN", report.file_format.startswith("Windows Portable Executable")
                            and not report.architecture.startswith("Unknown") and bool(report.sha256_hex),
                            f"PE detected; architecture={report.architecture}; SHA-256 present")
+        self._finish_scan_tracking(correlation_id)
 
     def save_report(self):
         if self.report is None:
@@ -226,7 +268,7 @@ class DesktopApp(tk.Tk):
             self.status.set("Report saved and validated  ·  Original binary unchanged")
         except (OSError, UnicodeError) as exc:
             self.trace_log.event("ERROR", "SAVE_FAILED", correlation_id=correlation,
-                                 errorType=type(exc).__name__)
+                                 **exception_details(exc))
             messagebox.showerror("Save failed", f"Could not save report ({type(exc).__name__}).")
 
     def export_diagnostics(self):
@@ -248,7 +290,7 @@ class DesktopApp(tk.Tk):
             self.status.set(f"Diagnostics exported ({count:,} bytes)")
         except (OSError, ValueError) as exc:
             self.trace_log.event("ERROR", "EXPORT_FAILED", correlation_id=correlation,
-                                 errorType=type(exc).__name__)
+                                 **exception_details(exc))
             messagebox.showerror("Export failed", f"Could not export diagnostics ({type(exc).__name__}).")
 
     def test_this_version(self):
@@ -293,8 +335,10 @@ class DesktopApp(tk.Tk):
         refresh()
 
     def _unexpected_error(self, error_type, value, traceback_obj):
-        self.trace_log.event("ERROR", "UNHANDLED_UI_EXCEPTION", errorType=error_type.__name__)
-        messagebox.showerror("Unexpected error", "An unexpected error occurred. Please export diagnostics.")
+        event_id = self.trace_log.event("ERROR", "UNHANDLED_UI_EXCEPTION",
+                                        **exception_details(value, traceback_obj))
+        messagebox.showerror("Unexpected error",
+                             f"An unexpected error occurred. Export diagnostics.\nDiagnostic event ID: {event_id}")
 
 
 def main():
