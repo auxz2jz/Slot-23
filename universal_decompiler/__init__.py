@@ -1,0 +1,3 @@
+"""Universal Decompiler: read-only binary identification (Stage 1)."""
+
+__version__ = "0.1.0"
